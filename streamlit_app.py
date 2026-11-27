@@ -1,5 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 # Show title and description.
 st.title("💬 Chatbot")
@@ -10,20 +11,15 @@ st.write(
 )
 
 # Ask user for their Gemini API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
 gemini_api_key = st.text_input("Gemini API Key", type="password")
 if not gemini_api_key:
     st.info("Please add your Gemini API key to continue.", icon="🗝️")
 else:
+    # 1. 新しい SDK の Client を初期化
+    client = genai.Client(api_key=gemini_api_key.strip())
+    MODEL_ID = "gemini-2.5-flash"  # 正しいモデル名を指定
 
-    # Configure Gemini API with trimmed key.
-    api_key = gemini_api_key.strip()
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-3.8-flash")
-
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
+    # Create a session state variable to store the chat messages.
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
@@ -32,8 +28,7 @@ else:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
+    # Create a chat input field to allow the user to enter a message.
     if prompt := st.chat_input("What is up?"):
 
         # Store and display the current prompt.
@@ -41,33 +36,31 @@ else:
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        # Convert chat history for Gemini API.
+        # 2. 新しい SDK の形式（types.Content）で会話履歴を構築
         gemini_messages = [
-            {
-                "role": "user" if m["role"] == "user" else "model",
-                "parts": [m["content"]],
-            }
+            types.Content(
+                role="user" if m["role"] == "user" else "model",
+                parts=[types.Part.from_text(text=m["content"])],
+            )
             for m in st.session_state.messages
         ]
 
         # Generate a response using the Gemini API.
         try:
-            stream = model.generate_content(gemini_messages, stream=True)
+            # 3. client.models.generate_content_stream を使用してストリーミング生成
+            stream = client.models.generate_content_stream(
+                model=MODEL_ID,
+                contents=gemini_messages,
+            )
 
             def stream_generator():
                 for chunk in stream:
                     if chunk.text:
                         yield chunk.text
 
-            # Stream the response to the chat using `st.write_stream`, then store it in 
-            # session state.
             with st.chat_message("assistant"):
                 response = st.write_stream(stream_generator)
             st.session_state.messages.append({"role": "assistant", "content": response})
+
         except Exception as e:
-            st.error(f"Error generating response (gemini-3.8-flash): {e}")
-            st.info(
-                "If you receive a 404 (NotFound) error, please check:\n"
-                "1. Your API key was obtained from Google AI Studio (https://aistudio.google.com/app/apikey).\n"
-                "2. Ensure your account has access to the gemini-3.8-flash model."
-            )
+            st.error(f"Error generating response ({MODEL_ID}): {e}")
