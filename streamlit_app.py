@@ -9,9 +9,8 @@ from google.genai import types
 # ページ設定
 st.set_page_config(page_title="リアルタイム議事録メーカー (Gemini版)", page_icon="🎙️", layout="wide")
 st.title("🎙️ リアルタイム議事録作成アプリ（Gemini版）")
-st.caption("声の違いを聞き分ける話者識別・議題別の議事録＆ネクストアクション・質問への模範解答生成に加え、過去の会議の保存・再開やキーワード解説ができます。")
+st.caption("高速処理モード搭載：文字起こしを最速表示したあと、話者別の議事録・ネクストアクション・模範解答を自動生成します。")
 
-# 議事録テキストから最初の議題タイトルを抽出して履歴名にするヘルパー関数
 def extract_meeting_title(minutes_text: str) -> str:
     match = re.search(r"###\s*議題1[：:]\s*(.+)", minutes_text)
     if match:
@@ -19,7 +18,6 @@ def extract_meeting_title(minutes_text: str) -> str:
         return title[:25] + ("..." if len(title) > 25 else "")
     return "無題の会議"
 
-# 現在の会議をアーカイブに保存する関数
 def archive_current_meeting():
     if not st.session_state.transcript_history:
         return
@@ -46,7 +44,6 @@ def archive_current_meeting():
     else:
         st.session_state.archived_meetings.insert(0, meeting_record)
 
-# 新しい会議状態へリセットする関数
 def start_new_meeting(save_current: bool = True):
     if save_current:
         archive_current_meeting()
@@ -59,7 +56,6 @@ def start_new_meeting(save_current: bool = True):
     st.session_state.last_audio_bytes = None
     st.session_state.audio_input_key = st.session_state.get("audio_input_key", 0) + 1
 
-# 過去の会議データを復元して途中から再開する関数
 def load_archived_meeting(meeting_id: str):
     archive_current_meeting()
     
@@ -85,9 +81,10 @@ with st.sidebar:
     default_api_key = st.secrets.get("GEMINI_API_KEY", "")
     api_key = st.text_input("Gemini API Key", value=default_api_key, type="password")
     
+    # 軽量・高速な flash-lite を選択肢の先頭に配置
     primary_model = st.selectbox(
-        "使用モデル（混雑時は自動で別モデルへ切替）",
-        options=["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.8-pro"],
+        "使用モデル（liteが最も高速です）",
+        options=["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-3.8-pro"],
         index=0,
     )
     
@@ -96,7 +93,7 @@ with st.sidebar:
     participants = st.text_input(
         "参加者名（カンマ区切り）",
         placeholder="例：田中（進行）, 佐藤, 鈴木",
-        help="入力しておくと、会話内の呼びかけや文脈から声と名前をより正確に紐づけます。空欄の場合は「発言者A」「発言者B」として識別します。"
+        help="入力しておくと声と名前をより正確に紐づけます。"
     )
     
     st.divider()
@@ -104,17 +101,15 @@ with st.sidebar:
         start_new_meeting(save_current=True)
         st.rerun()
 
-# APIキーのチェック
 if not api_key:
     st.warning("👈 左のサイドバーに Gemini API Key を入力してください。（Google AI Studioで取得できます）")
     st.stop()
 
-# Geminiクライアントの初期化
 client = genai.Client(api_key=api_key)
 
-# 503混雑エラー時に自動リトライ＆予備モデルへ切り替える共通関数
+# 自動リトライ付き生成関数（待機時間を短縮してレスポンス改善）
 def generate_with_retry(contents, config, preferred_model: str):
-    fallback_models = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.8-pro"]
+    fallback_models = ["gemini-3.8-flash-lite", "gemini-3.8-flash", "gemini-3.8-pro"]
     models_to_try = [preferred_model] + [m for m in fallback_models if m != preferred_model]
     
     last_error = None
@@ -130,24 +125,21 @@ def generate_with_retry(contents, config, preferred_model: str):
                 last_error = e
                 error_str = str(e)
                 if "503" in error_str or "UNAVAILABLE" in error_str or "429" in error_str:
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(1.5 * (attempt + 1))
                     continue
                 else:
                     break
     raise last_error
 
-# 用語解説を取得する関数
 def get_term_explanation(term: str, context: str) -> str:
     if term in st.session_state.term_explanations:
         return st.session_state.term_explanations[term]
     
     prompt = f"""
-あなたは優秀なビジネスアシスタントです。
-以下の【会議の文字起こし文脈】の中で使われている「{term}」という用語について、意味・背景・ポイントを分かりやすく簡潔に（3〜4行程度で）解説してください。
-一般的な意味だけでなく、この会議の文脈における使われ方も踏まえて教えてください。
+以下の【会議の文字起こし文脈】の中で使われている「{term}」の意味・背景を3行以内で簡潔に解説してください。
 
 【会議の文字起こし文脈】
-{context if context else "（まだ文脈はありません）"}
+{context if context else "（なし）"}
 """
     response = generate_with_retry(
         contents=prompt,
@@ -161,121 +153,123 @@ def get_term_explanation(term: str, context: str) -> str:
 # メイン画面：音声入力エリア
 st.subheader("1. 音声の録音")
 audio_value = st.audio_input(
-    "マイクボタンを押して発言を録音（停止すると自動処理されます）",
+    "マイクボタンを押して発言を録音（1〜2分ごとに区切ると高速に動作します）",
     key=f"audio_recorder_{st.session_state.audio_input_key}"
 )
 
-# 新しい音声が録音された場合の処理
+# 2カラムレイアウトを先に確保（処理中も画面がガタつかないようにする）
+st.divider()
+col1, col2 = st.columns([3, 2])
+minutes_placeholder = col1.empty()
+log_placeholder = col2.empty()
+
+# 新しい音声が録音された場合の2段階高速処理
 if audio_value is not None:
     audio_bytes = audio_value.getvalue()
     
     if audio_bytes != st.session_state.last_audio_bytes:
-        with st.spinner("Geminiが声の違いを聞き分け、議事録・ネクストアクション・模範解答を作成中..."):
+        participants_info = participants.strip() if participants.strip() else "未指定（声の特徴ごとに「発言者A」「発言者B」のように区別し、会話内で名前が呼ばれたらその名前を使用）"
+        
+        # 【ステップ1】まずは音声の文字起こしだけを最速で実行・画面表示
+        with st.status("🚀 高速解析中...", expanded=True) as status:
             try:
-                past_transcripts = "\n".join(st.session_state.transcript_history)
-                participants_info = participants.strip() if participants.strip() else "未指定（声の特徴ごとに「発言者A」「発言者B」のように区別し、会話内で名前が呼ばれたらその名前を使用してください）"
+                st.write("① 音声を文字起こし中（話者識別）...")
+                transcribe_prompt = f"""
+添付された音声データの声質・トーンの違いを聞き分け、話者ごとに改行して正確に日本語で文字起こししてください。
+- 発言の先頭に `【発言者A】` や `【田中】` のように話者ラベルを付けてください。
+- 参加者リスト：{participants_info}
+- 余計な挨拶や説明は一切省き、文字起こし結果のみを出力してください。
+"""
+                transcribe_res = generate_with_retry(
+                    contents=[
+                        types.Part.from_bytes(data=audio_bytes, mime_type="audio/wav"),
+                        transcribe_prompt,
+                    ],
+                    config=types.GenerateContentConfig(temperature=0.1),
+                    preferred_model=primary_model,
+                )
+                new_transcript = transcribe_res.text.strip()
+                st.session_state.transcript_history.append(new_transcript)
+                st.session_state.last_audio_bytes = audio_bytes
                 
-                prompt = f"""
+                # 文字起こし完了時点で即座に右カラムへ表示
+                st.write("② 議事録・模範解答・キーワードを生成中...")
+                
+                # 【ステップ2】テキストのみで議事録・模範解答・キーワードを一括生成（音声再処理なしなので高速）
+                full_transcripts = "\n".join(st.session_state.transcript_history)
+                minutes_prompt = f"""
 あなたは優秀な書記兼ビジネスコンサルタントです。
-添付された【新しい音声データ】の**声質・声の高さ・話し方の違い**を注意深く聞き分け、話者ごとに分離して文字起こしした上で、以下の3点を行ってください。
+以下の【会議の文字起こし履歴】をもとに、最新の議事録とキーワードを作成してください。
 
-1. **話者分離付きの正確な文字起こし:**
-   - 声の違いや会話のやり取りから発言者を識別し、各発言の先頭に `【発言者A】` や `【田中】` のように話者ラベルを付けて改行しながら文字起こししてください。
-   - 【これまでの発言履歴】で既に登場している話者ラベルがある場合は、文脈や役割を踏まえて同じラベルを一貫して使用してください。
-2. **最新議事録の作成・統合:**
-   - 【これまでの発言履歴】と今回の内容を統合し、議題ごとに「誰がどのような意見を出したか」「誰がネクストアクションの担当か」が明確になるよう整理してください。
-   - さらに「ネクストアクションの進め方・たたき台（模範解答）」と「会議内で出た質問・疑問点への回答案（模範解答）」も併記してください。
-3. **重要キーワードの抽出:**
-   - 今回の発言から、参加者が意味を調べたくなるような専門用語・ビジネス用語・固有名詞・略語を最大5個抽出してください。
-
-【参加者リスト（話者識別のヒント）】
-{participants_info}
-
-【これまでの発言履歴】
-{past_transcripts if past_transcripts else "（なし・これが最初の発言です）"}
+【会議の文字起こし履歴】
+{full_transcripts}
 
 【議事録の出力フォーマット（Markdown形式）】
 ## 📋 議題別の詳細・ネクストアクション・模範解答
 
 ### 議題1：（会話から推測される議題タイトル）
 - **📝 議論の要約（発言者別）:**
-  - （誰が何を提案・発言したかが分かるように箇条書きで整理）
+  - （誰が何を提案・発言したかが分かるように簡潔に箇条書き）
 - **📌 決定事項:** （決まったこと。なければ「継続議論」）
 - **🚀 この議題のネクストアクション:** 
-  - [ ] （具体的な行動内容 / 担当：〇〇 / 期限：〇〇 ※発言者や文脈から特定）
+  - [ ] （具体的な行動内容 / 担当：〇〇 / 期限：〇〇）
 - **💡 ネクストアクションの進め方・たたき台（模範解答）:**
-  - （上記のネクストアクションを実行する際の具体的な手順、確認すべきポイント、メール文面や資料構成案などの実践的な模範解答）
+  - （実行する際の具体的な手順やたたき台を簡潔に記載）
 - **❓ 質問・疑問点への回答案（模範解答）:**
   - **Q（質問者）：** （会議中で出た質問・懸念点。なければ「特になし」）
-  - **A（模範解答）：** （その質問に対する論理的で分かりやすい回答例・解決策）
+  - **A（模範解答）：** （簡潔で論理的な回答例）
 
-（※複数の議題がある場合は「### 議題2：〜」と続けて整理してください）
+（※複数の議題がある場合は「### 議題2：〜」と続けて整理）
 
 ---
 
 ## ✅ 全体のネクストアクション一覧（まとめ）
 - [ ] 【議題1】アクション内容（担当・期限）
 """
-                response = generate_with_retry(
-                    contents=[
-                        types.Part.from_bytes(
-                            data=audio_bytes,
-                            mime_type="audio/wav",
-                        ),
-                        prompt,
-                    ],
+                minutes_res = generate_with_retry(
+                    contents=minutes_prompt,
                     config=types.GenerateContentConfig(
                         response_mime_type="application/json",
                         response_schema={
                             "type": "OBJECT",
                             "properties": {
-                                "new_transcript": {
-                                    "type": "STRING",
-                                    "description": "声の違いを識別して話者ラベル（例：【発言者A】、【田中】）を付けた正確な日本語文字起こし",
-                                },
                                 "updated_minutes": {
                                     "type": "STRING",
-                                    "description": "これまでの履歴と今回の内容を統合した最新の議事録（発言者ごとの要約・ネクストアクション・模範解答を含むMarkdown形式）",
+                                    "description": "最新の議事録（Markdown形式）",
                                 },
                                 "extracted_keywords": {
                                     "type": "ARRAY",
                                     "items": {"type": "STRING"},
-                                    "description": "今回の発言に含まれる専門用語・固有名詞・略語などのキーワードリスト",
+                                    "description": "専門用語・固有名詞・略語（最大5個）",
                                 },
                             },
-                            "required": ["new_transcript", "updated_minutes", "extracted_keywords"],
+                            "required": ["updated_minutes", "extracted_keywords"],
                         },
                         temperature=0.2,
                     ),
                     preferred_model=primary_model,
                 )
                 
-                result = json.loads(response.text)
-                st.session_state.transcript_history.append(result["new_transcript"])
+                result = json.loads(minutes_res.text)
                 st.session_state.minutes = result["updated_minutes"]
-                st.session_state.last_audio_bytes = audio_bytes
                 
                 for kw in result.get("extracted_keywords", []):
                     if kw and kw not in st.session_state.keywords:
                         st.session_state.keywords.append(kw)
                 
-                st.success("話者を識別し、議事録・模範解答・キーワードを更新しました！")
+                status.update(label="✅ 完了しました！", state="complete", expanded=False)
                 
             except Exception as e:
-                st.error(f"サーバーが大変混雑しているため処理できませんでした。数秒おいて再度お試しください。({e})")
+                status.update(label="⚠️ 処理中にエラーが発生しました", state="error")
+                st.error(f"エラー詳細: {e}")
 
-st.divider()
-
-# 結果表示エリア（2カラム構成）
-col1, col2 = st.columns([3, 2])
-
+# 左カラム：議事録 ＆ 履歴表示
 with col1:
     st.subheader("2. 生成された議事録 ＆ 模範解答（リアルタイム更新）")
     st.markdown(st.session_state.minutes)
     
     st.write("")
     
-    # ダウンロードボタンと新規会議切り替えボタンを横並びで配置
     btn_col1, btn_col2 = st.columns(2)
     with btn_col1:
         st.download_button(
@@ -290,7 +284,6 @@ with col1:
             start_new_meeting(save_current=True)
             st.rerun()
 
-    # --- リセットボタンの下に過去の会議履歴（再開リスト）を表示 ---
     if st.session_state.archived_meetings:
         st.write("")
         with st.container(border=True):
@@ -317,10 +310,11 @@ with col1:
                         ]
                         st.rerun()
 
-with col2:
+# 右カラム：文字起こしログ ＆ 用語検索（部分更新フラグメント化して画面全体の再描画を防止）
+@st.fragment
+def render_right_column():
     st.subheader("3. 文字起こしログ（話者別） ＆ 用語検索")
     
-    # --- 気になる言葉のクリック検索エリア ---
     with st.container(border=True):
         st.markdown("🔍 **気になる言葉をクリックして意味を調べる**")
         
@@ -353,9 +347,11 @@ with col2:
 
     st.write("")
 
-    # --- 文字起こしログの表示 ---
     if st.session_state.transcript_history:
         for i, text in enumerate(st.session_state.transcript_history, 1):
             st.info(f"**録音 {i}:**\n\n{text}")
     else:
         st.write("録音されたテキストがここに蓄積されます。")
+
+with col2:
+    render_right_column()
