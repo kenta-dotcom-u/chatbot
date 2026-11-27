@@ -57,7 +57,7 @@ def get_term_explanation(term: str, context: str) -> str:
 {context if context else "（まだ文脈はありません）"}
 """
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.3),
     )
@@ -107,7 +107,7 @@ if audio_value is not None:
 - [ ] 【議題1】アクション内容（担当・期限）
 """
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.8-flash",
                     contents=[
                         types.Part.from_bytes(
                             data=audio_bytes,
