@@ -1,8 +1,8 @@
 # 🎙️ リアルタイム議事録作成アプリ（Gemini版）
 
-[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://あなたのアプリ名.streamlit.app/)
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://chatbot-7sb0yf29qf5.streamlit.app/)
 
-🔗 **公開アプリURL:** https://あなたのアプリ名.streamlit.app/
+🔗 **公開アプリURL:** https://chatbot-7sb0yf29qf5.streamlit.app/
 
 Streamlit と Google Gemini API（`gemini-3.8-flash`）を活用した、会議の音声録音・話者識別付き文字起こし・議事録の自動生成を行うWebアプリケーションです。
 
