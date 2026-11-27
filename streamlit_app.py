@@ -1,4 +1,6 @@
+import datetime
 import json
+import re
 import time
 import streamlit as st
 from google import genai
@@ -7,21 +9,78 @@ from google.genai import types
 # ページ設定
 st.set_page_config(page_title="リアルタイム議事録メーカー (Gemini版)", page_icon="🎙️", layout="wide")
 st.title("🎙️ リアルタイム議事録作成アプリ（Gemini版）")
-st.caption("会議の録音・文字起こし・議題別の議事録＆ネクストアクション・質問への模範解答生成に加え、気になるキーワードをクリックして意味を調べられます。")
+st.caption("会議の録音・文字起こし・議題別の議事録＆ネクストアクション・質問への模範解答生成に加え、過去の会議の保存・再開やキーワード解説ができます。")
 
-# 状態リセット用の共通関数
-def reset_meeting_state():
+# 議事録テキストから最初の議題タイトルを抽出して履歴名にするヘルパー関数
+def extract_meeting_title(minutes_text: str) -> str:
+    match = re.search(r"###\s*議題1[：:]\s*(.+)", minutes_text)
+    if match:
+        title = match.group(1).strip()
+        return title[:25] + ("..." if len(title) > 25 else "")
+    return "無題の会議"
+
+# 現在の会議をアーカイブに保存する関数
+def archive_current_meeting():
+    # まだ何も録音されていない場合は保存しない
+    if not st.session_state.transcript_history:
+        return
+
+    now_str = datetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+    title = extract_meeting_title(st.session_state.minutes)
+    
+    meeting_record = {
+        "id": st.session_state.current_meeting_id,
+        "title": title,
+        "updated_at": now_str,
+        "transcript_history": list(st.session_state.transcript_history),
+        "minutes": st.session_state.minutes,
+        "keywords": list(st.session_state.keywords),
+        "term_explanations": dict(st.session_state.term_explanations),
+    }
+
+    # すでに同じIDのアーカイブがあれば上書き更新、なければ先頭に追加
+    existing_idx = next(
+        (i for i, m in enumerate(st.session_state.archived_meetings) if m["id"] == meeting_record["id"]),
+        None
+    )
+    if existing_idx is not None:
+        st.session_state.archived_meetings[existing_idx] = meeting_record
+    else:
+        st.session_state.archived_meetings.insert(0, meeting_record)
+
+# 新しい会議状態へリセットする関数（保存してから初期化）
+def start_new_meeting(save_current: bool = True):
+    if save_current:
+        archive_current_meeting()
+    
+    st.session_state.current_meeting_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
     st.session_state.transcript_history = []
     st.session_state.minutes = "（まだ議事録はありません。音声を録音してください）"
     st.session_state.keywords = []
     st.session_state.term_explanations = {}
     st.session_state.last_audio_bytes = None
-    # 録音ウィジェット自体もリセットするためにキー番号を更新
     st.session_state.audio_input_key = st.session_state.get("audio_input_key", 0) + 1
 
-# セッション状態の初期化
-if "transcript_history" not in st.session_state:
-    reset_meeting_state()
+# 過去の会議データを復元して途中から再開する関数
+def load_archived_meeting(meeting_id: str):
+    # 現在作業中の会議があれば先に自動保存しておく
+    archive_current_meeting()
+    
+    target = next((m for m in st.session_state.archived_meetings if m["id"] == meeting_id), None)
+    if target:
+        st.session_state.current_meeting_id = target["id"]
+        st.session_state.transcript_history = list(target["transcript_history"])
+        st.session_state.minutes = target["minutes"]
+        st.session_state.keywords = list(target["keywords"])
+        st.session_state.term_explanations = dict(target["term_explanations"])
+        st.session_state.last_audio_bytes = None
+        st.session_state.audio_input_key = st.session_state.get("audio_input_key", 0) + 1
+
+# セッション状態の初期化（すべてのキーを安全に初期化）
+if "archived_meetings" not in st.session_state:
+    st.session_state.archived_meetings = []
+if "transcript_history" not in st.session_state or "audio_input_key" not in st.session_state or "current_meeting_id" not in st.session_state:
+    start_new_meeting(save_current=False)
 
 # サイドバー：APIキー設定とリセット
 with st.sidebar:
@@ -29,7 +88,6 @@ with st.sidebar:
     default_api_key = st.secrets.get("GEMINI_API_KEY", "")
     api_key = st.text_input("Gemini API Key", value=default_api_key, type="password")
     
-    # 混雑時に手動でも切り替えられるモデル選択
     primary_model = st.selectbox(
         "使用モデル（混雑時は自動で別モデルへ切替）",
         options=["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.8-pro"],
@@ -37,8 +95,8 @@ with st.sidebar:
     )
     
     st.divider()
-    if st.button("🔄 新しい会議を始める（リセット）", key="sidebar_reset", use_container_width=True):
-        reset_meeting_state()
+    if st.button("🔄 新しい会議を始める（現在の内容を保存）", key="sidebar_reset", use_container_width=True):
+        start_new_meeting(save_current=True)
         st.rerun()
 
 # APIキーのチェック
@@ -200,7 +258,7 @@ with col1:
     st.subheader("2. 生成された議事録 ＆ 模範解答（リアルタイム更新）")
     st.markdown(st.session_state.minutes)
     
-    st.write("") # 余白
+    st.write("")
     
     # ダウンロードボタンと新規会議切り替えボタンを横並びで配置
     btn_col1, btn_col2 = st.columns(2)
@@ -213,12 +271,37 @@ with col1:
             use_container_width=True
         )
     with btn_col2:
-        # 誤操作防止のためポップオーバーで確認ステップを用意
-        with st.popover("🔄 新しい会議を始める（リセット）", use_container_width=True):
-            st.warning("現在の議事録と文字起こし履歴を消去して、新しい会議を始めますか？（必要であれば先に左のボタンからダウンロードしてください）")
-            if st.button("はい、消去して新しい会議を始める", type="primary", use_container_width=True):
-                reset_meeting_state()
-                st.rerun()
+        if st.button("🔄 新しい会議を始める（現在の内容を保存）", key="main_reset_btn", use_container_width=True):
+            start_new_meeting(save_current=True)
+            st.rerun()
+
+    # --- リセットボタンの下に過去の会議履歴（再開リスト）を表示 ---
+    if st.session_state.archived_meetings:
+        st.write("")
+        with st.container(border=True):
+            st.markdown("📂 **過去の会議履歴（クリックすると途中から再開できます）**")
+            for past in st.session_state.archived_meetings:
+                is_current = (past["id"] == st.session_state.current_meeting_id)
+                label_prefix = "🟢 【編集中】" if is_current else "📄 再開する："
+                btn_label = f"{label_prefix} {past['title']}（{past['updated_at']} / 発言{len(past['transcript_history'])}件）"
+                
+                # 履歴ボタン（右端に個別削除ボタンも配置）
+                hist_col1, hist_col2 = st.columns([5, 1])
+                with hist_col1:
+                    if st.button(
+                        btn_label,
+                        key=f"load_{past['id']}",
+                        disabled=is_current,
+                        use_container_width=True
+                    ):
+                        load_archived_meeting(past["id"])
+                        st.rerun()
+                with hist_col2:
+                    if st.button("🗑️", key=f"del_{past['id']}", help="この履歴を削除"):
+                        st.session_state.archived_meetings = [
+                            m for m in st.session_state.archived_meetings if m["id"] != past["id"]
+                        ]
+                        st.rerun()
 
 with col2:
     st.subheader("3. 文字起こしログ ＆ 用語検索")
@@ -237,14 +320,12 @@ with col2:
         else:
             st.caption("音声を録音すると、ここに重要な用語がボタンとして並びます。")
             
-        # リストにない言葉も手動で調べられる入力欄
         custom_term = st.text_input(
             "リストにない言葉を直接入力して検索",
             placeholder="例：KPI、アジャイル、リスケ など",
             label_visibility="collapsed"
         )
         
-        # クリックされた単語または手入力された単語の解説を表示
         target_term = custom_term.strip() if custom_term.strip() else selected_term
         
         if target_term:
