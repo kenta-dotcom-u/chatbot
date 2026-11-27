@@ -213,4 +213,4 @@ with col2:
         for i, text in enumerate(st.session_state.transcript_history, 1):
             st.info(f"**発言 {i}:** {text}")
     else:
-        st.write("録音されたテキストがここに蓄積されます。")。")
+        st.write("録音されたテキストがここに蓄積されます。")
