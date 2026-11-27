@@ -9,17 +9,19 @@ st.set_page_config(page_title="リアルタイム議事録メーカー (Gemini�
 st.title("🎙️ リアルタイム議事録作成アプリ（Gemini版）")
 st.caption("会議の録音・文字起こし・議題別の議事録＆ネクストアクション・質問への模範解答生成に加え、気になるキーワードをクリックして意味を調べられます。")
 
+# 状態リセット用の共通関数
+def reset_meeting_state():
+    st.session_state.transcript_history = []
+    st.session_state.minutes = "（まだ議事録はありません。音声を録音してください）"
+    st.session_state.keywords = []
+    st.session_state.term_explanations = {}
+    st.session_state.last_audio_bytes = None
+    # 録音ウィジェット自体もリセットするためにキー番号を更新
+    st.session_state.audio_input_key = st.session_state.get("audio_input_key", 0) + 1
+
 # セッション状態の初期化
 if "transcript_history" not in st.session_state:
-    st.session_state.transcript_history = []
-if "minutes" not in st.session_state:
-    st.session_state.minutes = "（まだ議事録はありません。音声を録音してください）"
-if "keywords" not in st.session_state:
-    st.session_state.keywords = []
-if "term_explanations" not in st.session_state:
-    st.session_state.term_explanations = {}
-if "last_audio_bytes" not in st.session_state:
-    st.session_state.last_audio_bytes = None
+    reset_meeting_state()
 
 # サイドバー：APIキー設定とリセット
 with st.sidebar:
@@ -35,12 +37,8 @@ with st.sidebar:
     )
     
     st.divider()
-    if st.button("🗑️ 議事録と履歴をすべてリセット", use_container_width=True):
-        st.session_state.transcript_history = []
-        st.session_state.minutes = "（まだ議事録はありません。音声を録音してください）"
-        st.session_state.keywords = []
-        st.session_state.term_explanations = {}
-        st.session_state.last_audio_bytes = None
+    if st.button("🔄 新しい会議を始める（リセット）", key="sidebar_reset", use_container_width=True):
+        reset_meeting_state()
         st.rerun()
 
 # APIキーのチェック
@@ -99,7 +97,10 @@ def get_term_explanation(term: str, context: str) -> str:
 
 # メイン画面：音声入力エリア
 st.subheader("1. 音声の録音")
-audio_value = st.audio_input("マイクボタンを押して発言を録音（停止すると自動処理されます）")
+audio_value = st.audio_input(
+    "マイクボタンを押して発言を録音（停止すると自動処理されます）",
+    key=f"audio_recorder_{st.session_state.audio_input_key}"
+)
 
 # 新しい音声が録音された場合の処理
 if audio_value is not None:
@@ -199,12 +200,25 @@ with col1:
     st.subheader("2. 生成された議事録 ＆ 模範解答（リアルタイム更新）")
     st.markdown(st.session_state.minutes)
     
-    st.download_button(
-        label="📥 議事録をMarkdownでダウンロード",
-        data=st.session_state.minutes,
-        file_name="meeting_minutes.md",
-        mime="text/markdown"
-    )
+    st.write("") # 余白
+    
+    # ダウンロードボタンと新規会議切り替えボタンを横並びで配置
+    btn_col1, btn_col2 = st.columns(2)
+    with btn_col1:
+        st.download_button(
+            label="📥 議事録をMarkdownでダウンロード",
+            data=st.session_state.minutes,
+            file_name="meeting_minutes.md",
+            mime="text/markdown",
+            use_container_width=True
+        )
+    with btn_col2:
+        # 誤操作防止のためポップオーバーで確認ステップを用意
+        with st.popover("🔄 新しい会議を始める（リセット）", use_container_width=True):
+            st.warning("現在の議事録と文字起こし履歴を消去して、新しい会議を始めますか？（必要であれば先に左のボタンからダウンロードしてください）")
+            if st.button("はい、消去して新しい会議を始める", type="primary", use_container_width=True):
+                reset_meeting_state()
+                st.rerun()
 
 with col2:
     st.subheader("3. 文字起こしログ ＆ 用語検索")
