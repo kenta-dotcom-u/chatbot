@@ -1,19 +1,24 @@
-# 💬 Chatbot template
+# 🎙️ リアルタイム議事録作成アプリ（Gemini版）
 
-A simple Streamlit app that shows how to build a chatbot using OpenAI's GPT-3.5.
+Streamlit と Google Gemini API（`gemini-2.5-flash`）を活用した、会議の音声録音・文字起こし・議事録の自動生成を行うWebアプリケーションです。
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://chatbot-template.streamlit.app/)
+会議の区切りごとに音声を録音するだけで、過去の文脈を保持したまま「決定事項」「議論の要約」「ネクストアクション」をリアルタイムで構造化・更新します。
 
-### How to run it on your own machine
+---
 
-1. Install the requirements
+## ✨ 主な機能
 
-   ```
-   $ pip install -r requirements.txt
-   ```
+- **ブラウザ完結の音声録音:** Streamlit標準の `st.audio_input` を使用し、追加の録音ソフトなしで音声を収録
+- **高速なマルチモーダル処理:** Gemini 2.5 Flash に音声データを直接渡し、文字起こしと議事録の統合を1回のAPIリクエストで同時実行
+- **文脈を引き継ぐリアルタイム更新:** 発言を追加するたびに、それまでの履歴と統合して議事録を最新状態へ自動ブラッシュアップ
+- **Markdown出力:** 生成された議事録をワンクリックで `.md` ファイルとしてダウンロード可能
 
-2. Run the app
+---
 
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+## 📁 ファイル構成
+
+```text
+.
+├── app.py              # アプリケーション本体
+├── requirements.txt    # 依存パッケージ一覧
+└── README.md           # 本ドキュメント
