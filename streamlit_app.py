@@ -1,4 +1,5 @@
 import json
+import time
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -6,7 +7,7 @@ from google.genai import types
 # ページ設定
 st.set_page_config(page_title="リアルタイム議事録メーカー (Gemini版)", page_icon="🎙️", layout="wide")
 st.title("🎙️ リアルタイム議事録作成アプリ（Gemini版）")
-st.caption("会議の録音・文字起こし・議題別の議事録＆ネクストアクション生成に加え、気になるキーワードをクリックして意味を調べられます。")
+st.caption("会議の録音・文字起こし・議題別の議事録＆ネクストアクション・質問への模範解答生成に加え、気になるキーワードをクリックして意味を調べられます。")
 
 # セッション状態の初期化
 if "transcript_history" not in st.session_state:
@@ -26,6 +27,13 @@ with st.sidebar:
     default_api_key = st.secrets.get("GEMINI_API_KEY", "")
     api_key = st.text_input("Gemini API Key", value=default_api_key, type="password")
     
+    # 混雑時に手動でも切り替えられるモデル選択
+    primary_model = st.selectbox(
+        "使用モデル（混雑時は自動で別モデルへ切替）",
+        options=["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.8-pro"],
+        index=0,
+    )
+    
     st.divider()
     if st.button("🗑️ 議事録と履歴をすべてリセット", use_container_width=True):
         st.session_state.transcript_history = []
@@ -43,6 +51,30 @@ if not api_key:
 # Geminiクライアントの初期化
 client = genai.Client(api_key=api_key)
 
+# 503混雑エラー時に自動リトライ＆予備モデルへ切り替える共通関数
+def generate_with_retry(contents, config, preferred_model: str):
+    fallback_models = ["gemini-3.8-flash", "gemini-3.8-flash-lite", "gemini-3.8-pro"]
+    models_to_try = [preferred_model] + [m for m in fallback_models if m != preferred_model]
+    
+    last_error = None
+    for model_name in models_to_try:
+        for attempt in range(2):
+            try:
+                return client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                if "503" in error_str or "UNAVAILABLE" in error_str or "429" in error_str:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                else:
+                    break
+    raise last_error
+
 # 用語解説を取得する関数（キャッシュ機能付き）
 def get_term_explanation(term: str, context: str) -> str:
     if term in st.session_state.term_explanations:
@@ -56,10 +88,10 @@ def get_term_explanation(term: str, context: str) -> str:
 【会議の文字起こし文脈】
 {context if context else "（まだ文脈はありません）"}
 """
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
+    response = generate_with_retry(
         contents=prompt,
         config=types.GenerateContentConfig(temperature=0.3),
+        preferred_model=primary_model,
     )
     explanation = response.text
     st.session_state.term_explanations[term] = explanation
@@ -74,30 +106,33 @@ if audio_value is not None:
     audio_bytes = audio_value.getvalue()
     
     if audio_bytes != st.session_state.last_audio_bytes:
-        st.session_state.last_audio_bytes = audio_bytes
-        
-        with st.spinner("Geminiが音声を解析し、議題別の議事録とキーワードを抽出中..."):
+        with st.spinner("Geminiが音声を解析し、議事録・ネクストアクション・模範解答を作成中..."):
             try:
                 past_transcripts = "\n".join(st.session_state.transcript_history)
                 
                 prompt = f"""
-あなたは優秀な書記です。
+あなたは優秀な書記兼ビジネスコンサルタントです。
 添付された【新しい音声データ】を正確に日本語で文字起こしし、以下の3点を行ってください。
 1. 新しい音声データの正確な文字起こし
-2. 【これまでの発言履歴】と統合した最新の議事録の作成（議題ごとに要約・決定事項・ネクストアクションを紐づけて整理すること）
+2. 【これまでの発言履歴】と統合した最新の議事録の作成。議題ごとに要約・決定事項・ネクストアクションを整理した上で、さらに「ネクストアクションをスムーズに進めるための具体的な進め方・たたき台（模範解答）」と「会議内で出た質問・疑問点・未解決事項に対する回答案（模範解答）」も併記すること。
 3. 今回の発言から、参加者が意味を調べたくなるような専門用語・ビジネス用語・固有名詞・略語（キーワード）を最大5個抽出
 
 【これまでの発言履歴】
 {past_transcripts if past_transcripts else "（なし・これが最初の発言です）"}
 
 【議事録の出力フォーマット（Markdown形式）】
-## 📋 議題別の詳細・ネクストアクション
+## 📋 議題別の詳細・ネクストアクション・模範解答
 
 ### 議題1：（会話から推測される議題タイトル）
 - **📝 議論の要約:** （話された内容の要点）
 - **📌 決定事項:** （決まったこと。なければ「継続議論」）
 - **🚀 この議題のネクストアクション:** 
   - [ ] （具体的な行動内容 / 担当：〇〇 / 期限：〇〇 ※会話から読み取れる範囲で補記）
+- **💡 ネクストアクションの進め方・たたき台（模範解答）:**
+  - （上記のネクストアクションを実行する際の具体的な手順、確認すべきポイント、メール文面や資料構成案などの実践的な模範解答）
+- **❓ 質問・疑問点への回答案（模範解答）:**
+  - **Q:** （会議中で出た質問・懸念点・持ち帰り事項。質問がなければ「特になし」）
+  - **A（模範解答）:** （その質問に対する論理的で分かりやすい回答例・解決策）
 
 （※複数の議題がある場合は「### 議題2：〜」と続けて整理してください）
 
@@ -106,8 +141,7 @@ if audio_value is not None:
 ## ✅ 全体のネクストアクション一覧（まとめ）
 - [ ] 【議題1】アクション内容（担当・期限）
 """
-                response = client.models.generate_content(
-                    model="gemini-3.8-flash",
+                response = generate_with_retry(
                     contents=[
                         types.Part.from_bytes(
                             data=audio_bytes,
@@ -126,7 +160,7 @@ if audio_value is not None:
                                 },
                                 "updated_minutes": {
                                     "type": "STRING",
-                                    "description": "これまでの履歴と今回の内容を統合した最新の議事録（議題ごとのネクストアクションを含むMarkdown形式）",
+                                    "description": "これまでの履歴と今回の内容を統合した最新の議事録（議題ごとのネクストアクション・質問事項への模範解答を含むMarkdown形式）",
                                 },
                                 "extracted_keywords": {
                                     "type": "ARRAY",
@@ -136,23 +170,25 @@ if audio_value is not None:
                             },
                             "required": ["new_transcript", "updated_minutes", "extracted_keywords"],
                         },
-                        temperature=0.2,
+                        temperature=0.25,
                     ),
+                    preferred_model=primary_model,
                 )
                 
                 result = json.loads(response.text)
                 st.session_state.transcript_history.append(result["new_transcript"])
                 st.session_state.minutes = result["updated_minutes"]
+                st.session_state.last_audio_bytes = audio_bytes
                 
                 # 重複を除いてキーワードを追加
                 for kw in result.get("extracted_keywords", []):
                     if kw and kw not in st.session_state.keywords:
                         st.session_state.keywords.append(kw)
                 
-                st.success("議事録とキーワードを更新しました！")
+                st.success("議事録・模範解答・キーワードを更新しました！")
                 
             except Exception as e:
-                st.error(f"エラーが発生しました: {e}")
+                st.error(f"サーバーが大変混雑しているため処理できませんでした。数秒おいて再度お試しください。({e})")
 
 st.divider()
 
@@ -160,7 +196,7 @@ st.divider()
 col1, col2 = st.columns([3, 2])
 
 with col1:
-    st.subheader("2. 生成された議事録（リアルタイム更新）")
+    st.subheader("2. 生成された議事録 ＆ 模範解答（リアルタイム更新）")
     st.markdown(st.session_state.minutes)
     
     st.download_button(
@@ -206,7 +242,7 @@ with col2:
                 except Exception as e:
                     st.error(f"検索中にエラーが発生しました: {e}")
 
-    st.write("") # 余白
+    st.write("")
 
     # --- 文字起こしログの表示 ---
     if st.session_state.transcript_history:
